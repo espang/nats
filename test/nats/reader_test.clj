@@ -25,7 +25,9 @@
     (async/put! messages (str->bytes "PING\r\n"))
     (async/put! messages (str->bytes "PONG\r\n"))
     (async/put! messages (str->bytes "STOP\r\n"))
-    
+    ;; remove that:
+    (async/<!! (async/timeout 100))
+        
     (is (= {:command :info
             :content {"server_id" 123}}
            (async/poll! ch-info)))
