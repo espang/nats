@@ -1,0 +1,16 @@
+version: 2
+jobs:
+  build:
+    docker:
+      - image: circleci/clojure:tools-deps-1.10.1.502
+      
+    working_directory: ~/repo
+
+    environment:
+      JVM_OPTS: -Xmx3200m
+
+    steps:
+      - checkout
+      - run:
+          name: test it
+          command: clojure -A:test:runner
