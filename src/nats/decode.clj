@@ -37,7 +37,6 @@
   Increase the readerIndex of the buffer!"
   [[b1 b2] ^ByteBuf buf]
   (let [b (.readByte buf)]
-    (println "consumed " b " expect" b1 "or" b2)
     (or (= b1 b)
         (= b2 b))))
 
