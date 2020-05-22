@@ -56,23 +56,23 @@
                                      1             ; return
                                      (.readerIndex buf)))]
     (.readBytes buf array)
-    (if (and (consume-byte! return buf)
-             (consume-byte! newline-byte buf))
-      (String. array "UTF-8")
-      :protocl-error)))
+    (when (and (consume-byte! return buf)
+               (consume-byte! newline-byte buf))
+      (String. array "UTF-8"))))
 
 (defn ^:private parse-info
   " i/I is read. Parse the rest of the message."
   [^ByteBuf buf]
-  (when (and (consume-byte! n buf)
-             (consume-byte! f buf)
-             (consume-byte! o buf)
-             (consume-whitespace! buf))
+  (if (and (consume-byte! n buf)
+           (consume-byte! f buf)
+           (consume-byte! o buf)
+           (consume-whitespace! buf))
     (let [content (read-line buf)]
-      (if (string? content)
+      (if (some? content)
         {:msg/type :info
          :content  (json/read-str (str/trim content))}
-         content))))
+         :protocol-error))
+    :protocol-error))
 
 (defn ^:private parse-msg-payload 
   [^ByteBuf buf options]
@@ -93,16 +93,17 @@
 
 (defn ^:private parse-msg
   [^ByteBuf buf]
-  (when (and (consume-byte! s buf)
-             (consume-byte! g buf)
-             (consume-whitespace! buf))
+  (if (and (consume-byte! s buf)
+           (consume-byte! g buf)
+           (consume-whitespace! buf))
     (let [content (read-line buf)]
-      (if (string? content)
+      (if (some? content)
         (let [options (str/split content #"\s+")]
           (if (< 2 (count options) 5)
             (parse-msg-payload buf options)
             :protocol-error))
-        :protocol-error))))
+        :protocol-error))
+    :protocol-error))
 
 (defn ^:private parse-pingpong [^ByteBuf buf]
   (let [next-byte (.readByte buf)
