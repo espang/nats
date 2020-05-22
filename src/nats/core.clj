@@ -4,7 +4,9 @@
 
 
 (comment
-  (with-open [conn (nats/connect)]
-    (println "connected - waiting")
-    (Thread/sleep 5000)
-    (println "shuttding down")))
+  (do
+    (with-open [conn (nats/connect)]
+      (println "connected - waiting")
+      (Thread/sleep 5000)
+      (println "shuttding down"))
+    (println "shut down")))

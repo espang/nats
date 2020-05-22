@@ -96,14 +96,14 @@
          (channel NioSocketChannel)
          (remoteAddress (InetSocketAddress. host port))
          (handler (initializer)))
-     (let [channel-future (.. b (connect) (sync))]
+     (let [channel-future (.sync (.connect b))]
        (reify
          java.io.Closeable
          (close [this]
            (println "close the connection")
            (try
              (.sync
-              (.closeFuture
+              (.close
                (.channel channel-future)))
              (finally
                (println "close the eventgroup")
