@@ -8,19 +8,6 @@
            [io.netty.util CharsetUtil]
            [java.net InetSocketAddress]))
 
-(defrecord Connection [channel-future event-group]
-  java.io.Closeable
-  (close [this]
-    (try
-      (.. channel-future
-          (channel)
-          (closeFuture)
-          (sync))
-      (finally
-        (.. event-group
-            (shutdownGracefully)
-            (sync))))))
-
 (def default-options
   {:host "localhost"
    :port 4222})

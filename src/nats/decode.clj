@@ -3,7 +3,7 @@
             [clojure.data.json :as json ])
   (:import [io.netty.buffer ByteBuf ByteBufProcessor]
            [io.netty.util CharsetUtil]))
-(byte \P)
+
 ;; define the bytes we use as part of our operations:
 (def ^:private p (mapv byte [\p \P]))
 (def ^:private i (mapv byte [\i \I]))
