@@ -1,111 +1,133 @@
 (ns nats.connection
-  (:require [nats.decode :as decode])
+  (:require [clojure.core.async :as async] 
+            [nats.decode :as decode]
+            [nats.command :as command]
+            [nats.handler :as h])
   (:import [io.netty.bootstrap Bootstrap]
            [io.netty.buffer ByteBuf Unpooled]
-           [io.netty.channel ChannelInboundHandler ChannelInitializer]
+           [io.netty.channel ChannelInboundHandler ChannelInitializer ChannelFutureListener]
            [io.netty.channel.nio NioEventLoopGroup]
            [io.netty.channel.socket.nio NioSocketChannel]
            [io.netty.util CharsetUtil]
-           [java.net InetSocketAddress]))
+           [java.net InetSocketAddress]
+           [java.util.zip CRC32]))
 
-(def default-options
-  {:host "localhost"
-   :port 4222})
+(def default-options {:host "localhost"
+                      :port 4222})
 
-(defn channel-handler []
-  (reify ChannelInboundHandler
-    ; the channel of the ctx has been registered with its eventloop
-    (channelRegistered [this ctx]
-      (println "registered")
-      (.fireChannelRegistered ctx))
-    ; the channel of the ctx has been unregistered from its eventloop
-    (channelUnregistered [this ctx]
-      (println "unregistered")
-      (.fireChannelUnregistered ctx))
-    ; the channel of the ctx is now active
-    (channelActive [this ctx]
-      (println "active")
-      (.writeAndFlush
-       ctx
-       (Unpooled/copiedBuffer "PING\r\n" CharsetUtil/UTF_8))
-      (.fireChannelActive ctx))
-    ; the channel of the ctx is now inactive
-    (channelInactive [this ctx]
-      (println "inactive")
-      (.fireChannelInactive ctx))
-    ; invoked when the channel has read a message
-    (channelRead [this ctx msg]
-      (println "read")
-      ;(.fireChannelRead ctx)
-      ; the buffer represents the data from a single read op
-      ; need to buffer the buffer
-      (let [buf     (cast ByteBuf msg)
-            content (.toString
-                     buf
-                     CharsetUtil/UTF_8)]
-        (println "readable bytes:" (.readableBytes buf))
-        (when-let [msg (decode/parse msg)]
-          (println "msg:" msg))
-        (println "readable bytes:" (.readableBytes buf))
-        (println "actual content <" content ">")))
-    ; invoked when the last message from a CURRENT read operation
-    ; has been consumed from channelRead
-    (channelReadComplete [this ctx]
-      (println "readComplete")
-      ;(.fireChannelReadComplete ctx)
-      )
-    ; an user event was triggered
-    (userEventTriggered [this ctx event]
-      (println "event triggered")
-      (.fireUserEventTriggered ctx event))
-    ; called once the writable state of a channel changed
-    (channelWritabilityChanged [this ctx]
-      (println "writable changed")
-      (.fireChannelWritabilityChanged ctx))
-    ; called if throwable was thrown
-    (exceptionCaught [this ctx cause]
-      (println "exception")
-      (.printStackTrace cause)
-      (.close ctx))
-    
-    ; inherited from ChannelHandler
-
-    ; called after the handler was added to the ctx
-    (handlerAdded [this ctx]
-      (println "added"))
-    ; called after the handler was removed from the ctx
-    (handlerRemoved [this ctx]
-      (println "removed"))))
-
-(defn initializer []
+(defn initializer [chan]
   (proxy [ChannelInitializer] []
     (initChannel [ch]
-      (.addLast
-       (.pipeline ch)
-       (channel-handler)))))
+      (.addLast (.pipeline ch) (h/->NatsChannelHandler nil chan)))))
+
+(defn future-listener [label]
+  (proxy [ChannelFutureListener] []
+    (operationComplete [future]
+      (when (not (.isSuccess future))
+         (println "failure:" label)
+         (.printStacktrace
+          (.cause future))))))
+
+(defrecord Connection
+    [channel
+     event-group
+     
+     maintain-chan ; handle internal comms
+     subs-chan     ; handle subscriptions
+
+     running ; atom holding a boolean value
+     info
+     state
+     crc]
+  java.io.Closeable
+  (close [this]
+    (reset! running false)
+    (println "close the connection")
+    (try
+      (.sync (.close channel))
+      (finally
+        (println "close the eventgroup")
+        (.sync (.shutdownGracefully event-group))))))
+
+(defn value [conn]
+  (.getValue (:crc conn)))
+
+(defn write-to [conn buf]
+  (let [fut (.writeAndFlush (:channel conn) buf)]
+    (.addListener
+     fut
+     (future-listener "h"))))
+
+(defn sub [conn subject]
+  (let [s (command/sub-string subject)]
+    (write-to conn (.retain (Unpooled/copiedBuffer s CharsetUtil/UTF_8)))))
+
+(defn pub [conn subject payload]
+  (write-to conn (.retain (command/pub subject payload))))
+
+(defn make-connection [channel event-group pub]
+  (let [c1         (async/chan)
+        c2         (async/chan 100)
+        running    (atom true)
+        info       (atom nil)
+        state      (atom {})
+        crc        (CRC32.)]
+
+    (async/sub pub :info c1)
+    (async/sub pub :ping c1)
+    (async/sub pub :pong c1)
+    (async/sub pub :ok c1)
+    (async/go-loop []
+      (if @running
+        (let [{:keys [msg/type] :as msg} (async/<! c1)]
+          (println msg)
+          (case type
+            :info (reset! info (:conent msg))
+            :ping (.writeAndFlush channel (.retain command/pong))
+            :pong (swap! state assoc :last-pong (System/currentTimeMillis))
+            :ok   nil)
+          (recur))
+        (println
+         "Stopping connection go routine")))
+
+    (async/sub pub :msg c2)
+    (async/go-loop []
+      (if @running
+        (let [{:keys [content]} (async/<! c2)]
+          (swap! state update :msgs (fnil inc 0))
+          (.update crc (:payload content))
+          (recur))
+        (println
+         "Stopping subscription handler")))
+
+    (->Connection channel
+                  event-group
+                  c1
+                  c2
+                  running
+                  info
+                  state
+                  crc)))
 
 (defn connect
   ([] (connect default-options))
   ([{:keys [host port]}]
-   ;; create connection to nats via tcp
-   ;; implement reconnect
-   (let [g (NioEventLoopGroup.)
+   (let [; small buffer for incoming messages - allows to start go-routines after creating the connection
+         c (async/chan 100)
+         p (async/pub c :msg/type)
+         g (NioEventLoopGroup.)
          b (Bootstrap.)]
      (.. b
          (group g)
          (channel NioSocketChannel)
          (remoteAddress (InetSocketAddress. host port))
-         (handler (initializer)))
-     (let [channel-future (.sync (.connect b))]
-       (reify
-         java.io.Closeable
-         (close [this]
-           (println "close the connection")
-           (try
-             (.sync
-              (.close
-               (.channel channel-future)))
-             (finally
-               (println "close the eventgroup")
-               (.sync
-                (.shutdownGracefully g))))))))))
+         (handler (initializer c)))
+     (let [channel-future (.sync (.connect b))
+           conn (make-connection (.channel channel-future)
+                                 g
+                                 p)]
+       (println "write connect")
+       (write-to conn (.retain command/connect))
+       (println "write ping")
+       (write-to conn (.retain command/ping))
+       conn))))
