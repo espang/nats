@@ -10,10 +10,12 @@
 (def ^:private o (mapv byte [\o \O]))
 (def ^:private n (mapv byte [\n \N]))
 (def ^:private g (mapv byte [\g \G]))
+(def ^:private f (mapv byte [\f \F]))
 (def ^:private m (mapv byte [\m \M]))
 (def ^:private s (mapv byte [\s \S]))
-(def ^:private f (mapv byte [\f \F]))
+(def ^:private k (mapv byte [\k \K]))
 
+(def ^:private plus [(byte \+)])
 (def ^:private newline-byte [(byte \newline)])
 (def ^:private return [(byte \return)])
 
@@ -22,14 +24,19 @@
   to the first non whitespace byte. Returns false if the readerIndex
   hasn't changed."
   [^ByteBuf buf]
+  (when-not (.isReadable buf)
+    ;; incomplete message
+    (throw (IndexOutOfBoundsException.)))
   (let [next-non-ws-index (.forEachByte
                            buf
                            ByteBufProcessor/FIND_NON_LINEAR_WHITESPACE)]
-    (if (< (.readerIndex buf) next-non-ws-index)
-      (do 
-        (.readerIndex buf next-non-ws-index)
-        true)
-      false)))
+    (if (= -1 next-non-ws-index)
+      (throw (IndexOutOfBoundsException.))
+      (if (< (.readerIndex buf) next-non-ws-index)
+        (do
+          (.readerIndex buf next-non-ws-index)
+          true)
+        false))))
 
 (defn ^:private consume-byte!
   "Return true if the first readable byte
@@ -52,13 +59,15 @@
   (let [newline-index (.forEachByte
                        buf
                        ByteBufProcessor/FIND_LF)
-        array         (byte-array (- newline-index ; newline
-                                     1             ; return
-                                     (.readerIndex buf)))]
-    (.readBytes buf array)
-    (when (and (consume-byte! return buf)
-               (consume-byte! newline-byte buf))
-      (String. array "UTF-8"))))
+        length        (- newline-index 1 (.readerIndex buf))]
+    (if (pos-int? length)
+      (do
+        (let [array (byte-array length)]
+          (.readBytes buf array)
+          (when (and (consume-byte! return buf)
+                     (consume-byte! newline-byte buf))
+            (String. array "UTF-8"))))
+      :incomplete)))
 
 (defn ^:private parse-info
   " i/I is read. Parse the rest of the message."
@@ -97,12 +106,14 @@
            (consume-byte! g buf)
            (consume-whitespace! buf))
     (let [content (read-line buf)]
-      (if (some? content)
-        (let [options (str/split content #"\s+")]
-          (if (< 2 (count options) 5)
-            (parse-msg-payload buf options)
-            :protocol-error))
-        :protocol-error))
+      (case content
+        nil :protocol-error
+        :incomplete nil
+        (when (some? content)
+          (let [options (str/split content #"\s+")]
+            (if (< 2 (count options) 5)
+              (parse-msg-payload buf options)
+              :protocol-error)))))
     :protocol-error))
 
 (defn ^:private parse-pingpong [^ByteBuf buf]
@@ -120,16 +131,31 @@
         {:msg/type msg-type}
         :protocol-error))))
 
+(defn ^:private parse-ok [^ByteBuf buf]
+  (if (and (consume-byte! o buf)
+           (consume-byte! k buf)
+           (consume-byte! return buf)
+           (consume-byte! newline-byte buf))
+    {:msg/type :ok}
+    :protocol-error))
+
 (defn parse [^ByteBuf buf]
   ;; keep track of the reading position
   (.markReaderIndex buf)
   (try
-    (let [first-byte (.readByte buf)]
-      (cond
-        (is-byte? m first-byte) (parse-msg buf)
-        (is-byte? p first-byte) (parse-pingpong buf)
-        (is-byte? i first-byte) (parse-info buf)
-        :else :protocol-error))    
+    (when (.isReadable buf)
+      (let [first-byte (.readByte buf)
+            ret (cond
+                  (is-byte? m first-byte)    (parse-msg buf)
+                  (is-byte? p first-byte)    (parse-pingpong buf)
+                  (is-byte? i first-byte)    (parse-info buf)
+                  (is-byte? plus first-byte) (parse-ok buf)
+                  :else (do
+                          (println "first byte was '" (char first-byte) "'")
+                          :protocol-error))]
+        (when (nil? ret)
+          (.resetReaderIndex buf))
+        ret))    
     (catch IndexOutOfBoundsException ex
       ;; couldn't read a complete message. reset reader position
       ;; to re-read the same code.
