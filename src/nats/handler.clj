@@ -23,30 +23,9 @@
   (parse  [this]
     (let [msg (decode/parse buf)]
       (if (= :protocol-error msg)
-        (do
-          (println (str "error parsing: '"
-                        (.toString buf
-                                   (- (.readerIndex buf) 100)
-                                   100
-                                   CharsetUtil/UTF_8)
-                        "::"
-                        (.toString buf
-                                   (.readerIndex buf)
-                                   20
-                                   CharsetUtil/UTF_8)
-                        "'"
-                        (.readerIndex buf)
-                        (.writerIndex buf)))
-          (let [arr (byte-array 10)]
-            (.getBytes buf (- (.readerIndex buf) 10) arr)
-            (println "bytes:" (vec arr)))
-          false)
+        false ;; this should terminate the connection
         (if (some? msg)
-          (if (async/>!! chan msg)
-            true
-            (do 
-              (println "dropped message:'" msg "'\n")
-              true))
+          (async/>!! chan msg)
           false))))
 
   ChannelInboundHandler

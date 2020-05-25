@@ -78,20 +78,3 @@
       (let [buf (append buf " ")]
         (println (.readerIndex buf))
         (is (= nil (SUT/parse buf)))))))
-
-
-(.getByte
- (buf-from "MSG foo bf393ba9-d7be-4f67-9084-160f82c67c01 15\r\nhello foo!16397\r\nMSG") 66)
-
-(char 77)
-
-
-(.toString
- (Unpooled/buffer)
- 0 10
- CharsetUtil/UTF_8)
-
-(println
- (map print 
-      (.array
-       (.slice (buf-from "test" "+ok\r\n") 0 4))))
